@@ -8,6 +8,6 @@
   "scripts": {
     "dev": "node scripts/serve.mjs",
     "test": "node check.mjs",
-    "build": "node --check dist/app.js && node --check dist/world.js && node --check dist/game.js && node scripts/check-assets.mjs"
+    "build": "node --check dist/app.js && node --check dist/world.js && node --check dist/characters.js && node --check dist/game.js && node scripts/check-assets.mjs"
   }
 }
