@@ -69,11 +69,6 @@ function blade(parent,steel,gold,glow){
   ellipsoid(parent,gold,0,-.18,0,.038,.04,.038);
   tube(parent,[[0,.07,.019],[0,.65,.019]],.004,glow);
 }
-const portraitTextures=new Map();
-function portraitTexture(file){
-  if(!portraitTextures.has(file))portraitTextures.set(file,new Promise((resolve,reject)=>new T.TextureLoader().load('assets/'+file,t=>{t.colorSpace=T.SRGBColorSpace;resolve(t)},undefined,reject)));
-  return portraitTextures.get(file);
-}
 function face(head,skin,hair,variant,hero){
   // Tapered jaw, cheeks and a natural-sized cranium rather than a spherical head.
   const g=new T.SphereGeometry(1,Math.max(16,Math.floor(40*detail)),Math.max(12,Math.floor(28*detail))),p=g.attributes.position;
@@ -81,17 +76,8 @@ function face(head,skin,hair,variant,hero){
     const y=p.getY(i),jaw=y<-.2?1+(y+.2)*.28:1;
     p.setXYZ(i,p.getX(i)*(.129+(variant%4)*.003)*jaw,p.getY(i)*.162,p.getZ(i)*.108*(y<-.4?.85:1));
   }g.computeVertexNormals();
-  const id=hero.id??0,art=hero.art??0,col=art%3,row=Math.floor(art/3);
-  const japanese=[{x:.31,y:.20,w:.38,h:.45},{x:.33,y:.14,w:.42,h:.49},{x:.33,y:.15,w:.4,h:.50},{x:.29,y:.23,w:.42,h:.46},{x:.30,y:.18,w:.42,h:.50},{x:.31,y:.17,w:.44,h:.50}];const crop=id>=18?{x:.29,y:.06,w:.44,h:.165}:id>=12?{x:.29,y:.18,w:.43,h:.47}:id>=6?{x:.29,y:.14,w:.43,h:.49}:japanese[art];
-  const uv=g.attributes.uv;
-  for(let i=0;i<p.count;i++)uv.setXY(i,(col+crop.x+(.5+p.getX(i)/.27)*crop.w)/3,1-(row+crop.y+(.5-p.getY(i)/.324)*crop.h)/2);
-  const front=[],back=[],idx=g.index.array;
-  for(let i=0;i<idx.length;i+=3){const list=(p.getZ(idx[i])+p.getZ(idx[i+1])+p.getZ(idx[i+2]))/3>.035?front:back;list.push(idx[i],idx[i+1],idx[i+2])}
-  g.setIndex([...back,...front]);g.clearGroups();g.addGroup(0,back.length,0);g.addGroup(back.length,front.length,1);
-  const faceMaterial=skin.clone();const headMesh=mesh(head,g,[skin,faceMaterial]);
+  mesh(head,g,skin);
   const features=joint(head,0,0,0);
-  const file=id>=18?'portraits-curvy.png':id>=12?'portraits-elegant.png':id>=6?'portraits-kpop.png':'portraits.png';
-  portraitTexture(file).then(texture=>{faceMaterial.map=texture;faceMaterial.color.set(0xffffff);faceMaterial.roughness=.83;faceMaterial.needsUpdate=true;features.visible=false}).catch(()=>{});
   for(const side of[-1,1]){
     ellipsoid(features,skin,side*.129,-.008,0,.018,.035,.018);
     
@@ -246,63 +232,77 @@ function makeLOD(factory){
 }
 export function createValkyrie(hero={color:0x9dd8ee,art:0,id:0}){return makeLOD(q=>buildValkyrie(hero,q))}
 export function createEnemy(boss=false,variant=0){const lod=makeLOD(q=>buildEnemy(boss,variant,q));lod.userData.enemy=true;return lod}
+function smoothAngle(current,target,alpha){return current+Math.atan2(Math.sin(target-current),Math.cos(target-current))*alpha}
+function samplePose(progress,keys){
+  for(let i=1;i<keys.length;i++)if(progress<=keys[i][0]){
+    const a=keys[i-1],b=keys[i],t=T.MathUtils.smoothstep(progress,a[0],b[0]);return T.MathUtils.lerp(a[1],b[1],t);
+  }
+  return keys[keys.length-1][1];
+}
 export function animateRig(root,time,moving,dt){
-  if(root.isLOD){const visible=root.levels[root.getCurrentLevel()].object;visible.userData.attack=root.userData.attack;animateRig(visible,time,moving,dt);root.userData.attack=Math.max(0,root.userData.attack-dt);return}
-  const {rig}=root.userData;if(!rig)return;
-  const speed=root.userData.enemy?6.4:8.5;
-  const cycle=time*speed,amplitude=moving?.53:.015;
-  rig.body.position.y=moving?Math.abs(Math.sin(cycle))*.025:Math.sin(time*1.8)*.009;
-  rig.body.rotation.z=moving?Math.sin(cycle)*.018:0;
-  rig.head.rotation.y=Math.sin(time*.65)*.035;
-  rig.hips.forEach((hip,i)=>{
-    const phase=cycle+i*Math.PI;
-    if(moving){
-      // Analytic two-bone IK keeps the stance foot near the floor and lifts the swing foot.
-      const upper=.46,lower=.41,z=-Math.cos(phase)*.19,y=-.86-rig.body.position.y+Math.max(0,Math.sin(phase))*.09;
-      const distance=Math.min(Math.hypot(y,z),upper+lower-.002),aim=Math.atan2(-z,-y);
+  const step=T.MathUtils.clamp(dt,0,.1);
+  const state=root.userData.animation??(root.userData.animation={phase:0,blend:0,lastPosition:root.position.clone(),hair:0,hairVelocity:0,cloth:0,clothVelocity:0,poses:null});
+  const travelled=root.position.distanceTo(state.lastPosition);state.lastPosition.copy(root.position);
+  // Animation advances with actual travel, including the companion's own movement.
+  const speed=step>0?Math.min(travelled/step,4):0;
+  const targetBlend=moving&&speed>.02?T.MathUtils.clamp(speed/1.8,0,1):0;
+  state.blend=T.MathUtils.lerp(state.blend,targetBlend,1-Math.exp(-10*step));
+  if(travelled<.75)state.phase+=travelled*(Math.PI*2/1.35);
+  const cycle=state.phase;
+  const attack=root.userData.attack||0;
+  const progress=T.MathUtils.clamp(1-attack/.45,0,1);
+  const attacking=attack>0;
+  const walk=state.blend*(attacking?.3:1);
+  const hairTarget=moving?Math.sin(cycle)*.012:0;
+  // Exact damped convergence keeps secondary motion bounded at low frame rates.
+  state.hair=T.MathUtils.lerp(state.hair,hairTarget,1-Math.exp(-8*step));
+  const clothTarget=(moving?-.045:0)+Math.sin(time*1.5)*.006;
+  state.cloth=T.MathUtils.lerp(state.cloth,clothTarget,1-Math.exp(-5*step));
+  const models=root.isLOD?root.levels.map(l=>l.object):[root];
+  const activeIndex=root.isLOD?root.getCurrentLevel():0;
+  for(let level=0;level<models.length;level++){
+    const model=models[level],rig=model.userData.rig;if(!rig)continue;
+    const blend=1-Math.exp(-14*step);
+    rig.body.position.y=Math.sin(cycle*2)*.008*walk;
+    rig.body.rotation.z=Math.sin(cycle)*.006*walk;rig.body.rotation.x=T.MathUtils.lerp(rig.body.rotation.x,root.userData.dodging?-.12:0,blend);
+    rig.body.rotation.y=attacking?samplePose(progress,[[0,0],[.2,-.10],[.55,.14],[1,0]]):T.MathUtils.lerp(rig.body.rotation.y,0,blend);
+    rig.head.rotation.y=T.MathUtils.lerp(rig.head.rotation.y,0,blend);
+    rig.hips.forEach((hip,i)=>{
+      const phase=cycle+i*Math.PI;
+      const upper=.46,lower=.41;
+      const footZ=-Math.cos(phase)*.28*walk;
+      const footY=-.858-rig.body.position.y+Math.max(0,Math.sin(phase))*.065*walk;
+      const distance=Math.min(Math.hypot(footY,footZ),upper+lower-.002);
+      const aim=Math.atan2(-footZ,-footY);
       const hipBend=Math.acos(T.MathUtils.clamp((upper*upper+distance*distance-lower*lower)/(2*upper*distance),-1,1));
-      hip.rotation.x=aim-hipBend;
-      rig.knees[i].rotation.x=Math.acos(T.MathUtils.clamp((distance*distance-upper*upper-lower*lower)/(2*upper*lower),-1,1));
-    }else{hip.rotation.x=0;rig.knees[i].rotation.x=.035}
-  });
-  rig.shoulders.forEach((s,i)=>{s.rotation.x=-Math.sin(cycle+i*Math.PI)*amplitude*.65;rig.elbows[i].rotation.x=-.12-(moving?Math.max(0,Math.sin(cycle+i*Math.PI))*.25:0)});
-  if(root.userData.attack>0){
-    const progress=1-root.userData.attack/.45;
-    rig.shoulders[0].rotation.x=-1.4+Math.sin(progress*Math.PI)*2.1;
-    rig.shoulders[0].rotation.z=-.15-Math.sin(progress*Math.PI)*.9;
-    rig.elbows[0].rotation.x=-.65+progress*.5;
-    root.userData.attack=Math.max(0,root.userData.attack-dt);
-  }else rig.shoulders[0].rotation.z=-.09;
-  simulateCloth(rig.cloak,time,moving,dt);
-  if(rig.locks){const motion=root.userData.motion??(root.userData.motion={hair:0,hairVelocity:0});const target=moving?Math.sin(cycle)*.05:0;const step=Math.min(dt,.033);motion.hairVelocity+=((target-motion.hair)*65-motion.hairVelocity*10)*step;motion.hair+=motion.hairVelocity*step;rig.locks.rotation.x=motion.hair}
+      const kneeBend=Math.acos(T.MathUtils.clamp((distance*distance-upper*upper-lower*lower)/(2*upper*lower),-1,1));
+      hip.rotation.x=smoothAngle(hip.rotation.x,aim-hipBend,blend);
+      rig.knees[i].rotation.x=T.MathUtils.lerp(rig.knees[i].rotation.x,kneeBend,blend);
+    });
+    rig.shoulders.forEach((shoulder,i)=>{
+      let x=-.08-Math.sin(cycle+i*Math.PI)*.16*walk,z=i===0?-.09:.09,elbow=-.12;
+      if(i===0&&attacking){
+        x=samplePose(progress,[[0,-.08],[.22,-.62],[.55,.36],[.78,.10],[1,-.08]]);
+        z=samplePose(progress,[[0,-.09],[.22,-.35],[.55,.18],[1,-.09]]);
+        elbow=samplePose(progress,[[0,-.12],[.22,-.55],[.55,-.20],[1,-.12]]);
+      }
+      shoulder.rotation.x=T.MathUtils.lerp(shoulder.rotation.x,x,blend);
+      shoulder.rotation.z=T.MathUtils.lerp(shoulder.rotation.z,z,blend);
+      rig.elbows[i].rotation.x=T.MathUtils.lerp(rig.elbows[i].rotation.x,elbow,blend);
+    });
+    if(rig.locks)rig.locks.rotation.x=state.hair;
+    // Reconstruct a bounded cloth pose from its rest shape, never accumulated drift.
+    const cloth=rig.cloak.geometry.attributes.position,rest=rig.cloak.userData.rest;
+    for(let i=0;i<cloth.count;i++){
+      const v=T.MathUtils.clamp((1.70-rest[i*3+1])/1.15,0,1);
+      const flutter=Math.sin(time*2-rest[i*3]*4-v*2)*.007*v;
+      cloth.setXYZ(i,rest[i*3],rest[i*3+1],rest[i*3+2]+state.cloth*v*v+flutter);
+    }
+    cloth.needsUpdate=true;if(level===activeIndex)rig.cloak.geometry.computeVertexNormals();
+  }
+  root.userData.attack=Math.max(0,attack-step);
 }
 export function disposeCharacter(root){
   const geometries=new Set(),materials=new Set();root.traverse(n=>{if(n.isMesh){if(n.geometry!==sphere&&n.geometry!==irisGeo&&n.geometry!==midSphere&&n.geometry!==lowSphere)geometries.add(n.geometry);for(const m of Array.isArray(n.material)?n.material:[n.material])materials.add(m)}});
   for(const g of geometries)g.dispose();for(const m of materials)m.dispose();
-}
-
-function simulateCloth(cloak,time,moving,dt){
-  const data=cloak.userData,p=cloak.geometry.attributes.position,previous=data.previous,rest=data.rest,columns=data.columns;
-  data.accumulator=Math.min(data.accumulator+dt,.05);
-  const step=1/60;
-  while(data.accumulator>=step){
-    data.accumulator-=step;
-    for(let i=columns;i<p.count;i++){
-      const offset=i*3,x=p.getX(i),y=p.getY(i),z=p.getZ(i);
-      const wind=Math.sin(time*2.5+x*4)*(moving?2.3:.7)-(moving?1.5:.25);
-      p.setXYZ(i,x+(x-previous[offset])*.94,y+(y-previous[offset+1])*.94-1.1*step*step,z+(z-previous[offset+2])*.94+wind*step*step);
-      previous[offset]=x;previous[offset+1]=y;previous[offset+2]=z;
-    }
-    for(let iteration=0;iteration<3;iteration++){
-      for(const [a,b,length] of data.constraints){
-        const dx=p.getX(b)-p.getX(a),dy=p.getY(b)-p.getY(a),dz=p.getZ(b)-p.getZ(a),distance=Math.hypot(dx,dy,dz)||1;
-        const factor=(distance-length)/distance*.48;
-        if(a>=columns)p.setXYZ(a,p.getX(a)+dx*factor,p.getY(a)+dy*factor,p.getZ(a)+dz*factor);
-        if(b>=columns)p.setXYZ(b,p.getX(b)-dx*factor,p.getY(b)-dy*factor,p.getZ(b)-dz*factor);
-      }
-      for(let i=0;i<columns;i++)p.setXYZ(i,rest[i*3],rest[i*3+1],rest[i*3+2]);
-      for(let i=columns;i<p.count;i++)p.setZ(i,Math.min(p.getZ(i),-.13));
-    }
-  }
-  p.needsUpdate=true;cloak.geometry.computeVertexNormals();
 }
